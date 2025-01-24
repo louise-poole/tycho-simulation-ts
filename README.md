@@ -44,6 +44,67 @@ TYCHO_API_KEY=your_api_key_here
 npm run example
 ```
 
+### Running the Spot Price Example
+
+The spot price example demonstrates how to fetch prices between USDC and WETH:
+
+```typescript
+// examples/spot_price.ts
+import { createClient } from '../';
+import dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
+
+async function main() {
+  // USDC and WETH addresses on Ethereum mainnet
+  const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
+  const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
+
+  // Create client with your API key
+  const client = await createClient(
+    'https://api.tycho.xyz',
+    process.env.TYCHO_API_KEY
+  );
+
+  // Get spot price
+  const price = await client.getSpotPrice(USDC, WETH);
+  console.log(`Current USDC/WETH price: ${price}`);
+
+  // Get amounts out for different USDC amounts
+  const amounts = [1000000, 10000000, 100000000]; // 1, 10, 100 USDC
+  const result = await client.getAmountOut(USDC, WETH, amounts);
+  
+  console.log('\nSwap simulations:');
+  result.forEach((pool, i) => {
+    console.log(`\nPool ${i + 1} (${pool.poolAddress}):`);
+    pool.amountsOut.forEach((amount, j) => {
+      console.log(`${amounts[j] / 1e6} USDC -> ${amount / 1e18} WETH (Gas: ${pool.gasEstimates[j]})`);
+    });
+  });
+}
+
+main().catch(console.error);
+```
+
+To run this example:
+
+1. Make sure you have a valid Tycho API key in your `.env` file
+2. Build the project: `npm run build-all`
+3. Run the example: `npm run example`
+
+Expected output:
+```
+Current USDC/WETH price: 0.000625
+
+Swap simulations:
+
+Pool 1 (0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640):
+1 USDC -> 0.000621 WETH (Gas: 90000)
+10 USDC -> 0.006198 WETH (Gas: 90000)
+100 USDC -> 0.061734 WETH (Gas: 90000)
+```
+
 ### API Example
 
 ```typescript

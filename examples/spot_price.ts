@@ -57,7 +57,7 @@ async function runBenchmark(): Promise<void> {
         const USDT = "0xdac17f958d2ee523a2206206994597c13d831ec7";  // Ethereum Mainnet USDT
 
         // Generate 10000 random amounts between 0.1 and 100 WETH
-        const amountsIn = generateRandomAmounts(1000, 0.1, 100);
+        const amountsIn = generateRandomAmounts(1000, 1, 10);
         console.log(`Generated ${amountsIn.length} random amounts`);
         console.log("Sample amounts:", amountsIn.slice(0, 5));
 
