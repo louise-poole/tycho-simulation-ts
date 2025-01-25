@@ -26,6 +26,7 @@ use tycho_simulation::{
 use std::io::Write;
 use num_traits::cast::ToPrimitive;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
+use std::any::Any;
 
 // First, let's add a type alias at the top of the file to make things cleaner
 type StreamType = Box<dyn Stream<Item = Result<BlockUpdate, StreamDecodeError>> + Send + Unpin>;
@@ -74,53 +75,25 @@ impl SimulationClient {
         
         // Store pairs like in the example
         let states = Arc::new(TokioMutex::new(HashMap::new()));
-        let mut retries = 5;
         
-        while retries > 0 {
-            log(&format!("Waiting for pool states... attempt {}", 6 - retries));
+        // Get initial state
+        {  // Add scope to limit the borrow
             let mut stream = protocol_stream.lock().await;
-            match stream.next().await {
-                Some(Ok(update)) => {
-                    let mut states_map = states.lock().await;
-                    log(&format!("Received block {}", update.block_number));
-                    log(&format!("Received update with {} new pairs", update.new_pairs.len()));
-                    
-                    // Store pairs and states
-                    for (id, comp) in update.new_pairs {
-                        if let Some(state) = update.states.get(&id) {
-                            states_map.insert(id.clone(), (state.clone(), comp.clone()));
-                        }
-                    }
-                    
-                    log(&format!("Total pools now: {}", states_map.len()));
-                    if !states_map.is_empty() {
-                        break;
+            if let Some(Ok(update)) = stream.next().await {
+                let mut states_map = states.lock().await;
+                log(&format!("Received block {}", update.block_number));
+                log(&format!("Received update with {} new pairs", update.new_pairs.len()));
+                
+                // Store pairs and states
+                for (id, comp) in update.new_pairs {
+                    if let Some(state) = update.states.get(&id) {
+                        states_map.insert(id.clone(), (state.clone(), comp.clone()));
                     }
                 }
-                Some(Err(e)) => {
-                    log(&format!("Error receiving update: {}", e));
-                }
-                None => {
-                    log("Stream ended unexpectedly");
-                }
+                
+                log(&format!("Total pools now: {}", states_map.len()));
             }
-            retries -= 1;
-            if retries > 0 {
-                log("Waiting 2 seconds before next attempt...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            }
-        }
-
-        let pool_count = states.lock().await.len();
-        if pool_count == 0 {
-            log("Warning: No pool states received after all retries");
-        } else {
-            log(&format!("Successfully loaded {} pools", pool_count));
-        }
-
-        // Convert HashMap<Bytes, Token> to Vec<Token>
-        let tokens = all_tokens.into_values().collect::<Vec<_>>();
-        log(&format!("Converted {} tokens to vector", tokens.len()));
+        }  // stream is dropped here, releasing the lock
 
         // Create a channel for stream updates
         let (tx, mut rx) = mpsc::channel(100);
@@ -159,7 +132,7 @@ impl SimulationClient {
                 let mut states_map = states_ref.lock().await;
                 log(&format!("Received block {}", update.block_number));
                 
-                // Update existing states - use reference to avoid move
+                // Update existing states
                 for (id, state) in &update.states {
                     if let Some((existing_state, _)) = states_map.get_mut(id) {
                         *existing_state = state.clone();
@@ -180,10 +153,14 @@ impl SimulationClient {
             log("Update processor stopped");
         });
 
+        // Convert HashMap<Bytes, Token> to Vec<Token>
+        let tokens = all_tokens.into_values().collect::<Vec<_>>();
+        log(&format!("Converted {} tokens to vector", tokens.len()));
+
         Ok(Self {
             tokens,
             states,
-            protocol_stream,
+            protocol_stream: Arc::clone(&protocol_stream),  // Clone the Arc instead of moving
         })
     }
 
@@ -263,6 +240,29 @@ fn create_client(mut cx: FunctionContext) -> JsResult<JsPromise> {
 
 fn normalize_address(address: &str) -> String {
     address.trim_start_matches("0x").to_lowercase()
+}
+
+fn get_protocol_name(state: &Box<dyn ProtocolSim>) -> String {
+    // Get full type name for logging
+    let type_name = std::any::type_name_of_val(&**state);
+    log(&format!("Full type name: {}", type_name));
+    
+    // Extract protocol name from type
+    let protocol = if type_name.contains("UniswapV2State") {
+        "uniswap_v2"
+    } else if type_name.contains("UniswapV3State") {
+        "uniswap_v3"
+    } else if type_name.contains("EVMPoolState") && type_name.contains("curve") {
+        "curve"
+    } else if type_name.contains("EVMPoolState") && type_name.contains("balancer") {
+        "balancer_v2"
+    } else {
+        log(&format!("Unknown protocol type: {}", type_name));
+        "unknown"
+    };
+
+    log(&format!("Detected protocol: {}", protocol));
+    protocol.to_string()
 }
 
 fn get_spot_price(mut cx: FunctionContext) -> JsResult<JsPromise> {
@@ -371,17 +371,16 @@ fn get_amount_out(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let channel = cx.channel();
     let (deferred, promise) = cx.promise();
     
-    let client_ref = Arc::clone(&client.0);
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let client_ref = Arc::clone(&client.0);
 
     std::thread::spawn(move || {
         rt.block_on(async {
+            // Get all the data we need in one go
             let states = client_ref.states.lock().await;
             let mut results = Vec::new();
             
-            log(&format!("Checking {} pools for matches", states.len()));
-
-            // Iterate through all pools
+            // Process pools and collect results
             for (pool_id, (state, comp)) in states.iter() {
                 // Log pool token count
                 let pool_tokens = &comp.tokens;
@@ -408,13 +407,6 @@ fn get_amount_out(mut cx: FunctionContext) -> JsResult<JsPromise> {
                         }
                     }
 
-                    // if let Ok(spot_price) = state.spot_price(&token0, &token1) {
-                    //     log(&format!("Current spot price {}/{}: {}", 
-                    //         token0.symbol,
-                    //         token1.symbol,
-                    //         spot_price));
-                    // }
-
                     log(&format!("\nProcessing amounts for pool {}:", pool_id));
                     let mut amounts_out = Vec::new();
                     let mut gas_estimates = Vec::new();  // Add vector for gas values
@@ -429,10 +421,6 @@ fn get_amount_out(mut cx: FunctionContext) -> JsResult<JsPromise> {
                                 amounts_out.push(amount_out);
                                 let gas = result.gas.clone();  // Clone the gas value
                                 gas_estimates.push(gas.clone());  // Store gas estimate
-                                // log(&format!("Calculated amount out: {} {} -> {} {} (gas: {})", 
-                                //     amount_in, token0.symbol,
-                                //     amount_out, token1.symbol,
-                                //     gas));  // Use cloned gas value
                             }
                             Err(e) => {
                                 log(&format!("Error calculating amount out for pool {}: {}", pool_id, e));
@@ -443,35 +431,40 @@ fn get_amount_out(mut cx: FunctionContext) -> JsResult<JsPromise> {
                     }
 
                     if !has_error {
-                        // log(&format!("Adding results for pool {} with {} amounts", pool_id, amounts_out.len()));
-                        results.push((pool_id.clone(), amounts_out, gas_estimates));  // Include gas estimates in results
+                        // Include protocol name in results
+                        let protocol = get_protocol_name(state);
+                        results.push((pool_id.clone(), amounts_out, gas_estimates, protocol));
                     }
                 }
             }
+            drop(states); // Release the lock before settling
 
-            log(&format!("Found {} matching pools with results", results.len()));
             deferred.settle_with(&channel, move |mut cx| {
-                // Create array of objects with results
                 let js_array = JsArray::new(&mut cx, results.len());
                 
-                for (i, (pool_id, amounts_out, gas_estimates)) in results.into_iter().enumerate() {
+                for (i, (pool_id, amounts_out, gas_estimates, protocol)) in results.into_iter().enumerate() {
                     let obj = cx.empty_object();
+                    
+                    // Create all JS values first
                     let js_pool = cx.string(pool_id);
+                    let js_protocol = cx.string(protocol);
                     let js_amounts = JsArray::new(&mut cx, amounts_out.len());
                     let js_gas = JsArray::new(&mut cx, gas_estimates.len());
                     
+                    // Fill arrays
                     for (j, amount) in amounts_out.into_iter().enumerate() {
                         let js_amount = cx.number(amount);
                         js_amounts.set(&mut cx, j as u32, js_amount)?;
                     }
 
                     for (j, gas) in gas_estimates.into_iter().enumerate() {
-                        // Convert gas value using to_f64() from ToPrimitive trait
                         let js_gas_value = cx.number(gas.to_f64().unwrap_or(0.0));
                         js_gas.set(&mut cx, j as u32, js_gas_value)?;
                     }
 
+                    // Set all object properties
                     obj.set(&mut cx, "poolAddress", js_pool)?;
+                    obj.set(&mut cx, "protocol", js_protocol)?;
                     obj.set(&mut cx, "amountsOut", js_amounts)?;
                     obj.set(&mut cx, "gasEstimates", js_gas)?;
                     

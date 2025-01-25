@@ -9,6 +9,7 @@ interface SwapResult {
     poolAddress: string;
     amountsOut: number[];
     gasEstimates: number[];
+    protocol: string;
 }
 
 interface TychoSimulation {
@@ -79,6 +80,7 @@ async function runBenchmark(): Promise<void> {
             console.log("Sample results from first pool:");
             const firstPool = results[0];
             console.log(`Pool: ${firstPool.poolAddress}`);
+            console.log(`Protocol: ${firstPool.protocol}`);
             console.log("First 5 amounts:");
             for (let i = 0; i < 5; i++) {
                 console.log(`  ${amountsIn[i]} WETH -> ${firstPool.amountsOut[i]} USDT (gas: ${firstPool.gasEstimates[i]})`);
