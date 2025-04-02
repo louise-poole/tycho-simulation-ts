@@ -10,7 +10,7 @@ use tycho_simulation::{
         decoder::StreamDecodeError,
         engine_db::tycho_db::PreCachedDB,
         protocol::{
-            filters::{balancer_pool_filter, curve_pool_filter},
+            filters::{balancer_pool_filter, curve_pool_filter, uniswap_v4_pool_with_hook_filter},
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             vm::state::EVMPoolState,
@@ -27,7 +27,7 @@ use tycho_simulation::{
     utils::load_all_tokens,
 };
 
-// First, let's add a type alias at the top of the file to make things cleaner
+// Simulation client wrapper
 type StreamType = Box<dyn Stream<Item = Result<BlockUpdate, StreamDecodeError>> + Send + Unpin>;
 
 struct SimulationClient {
@@ -39,53 +39,103 @@ struct SimulationClient {
 
 impl Finalize for SimulationClient {}
 
+fn register_exchanges(
+    mut builder: ProtocolStreamBuilder,
+    exchanges: Vec<String>,
+    tvl_filter: ComponentFilter,
+) -> ProtocolStreamBuilder {
+    for exchange in &exchanges {
+        match exchange.as_str() {
+            "uniswap_v2" => {
+                builder =
+                    builder.exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None);
+            }
+            "uniswap_v3" => {
+                builder =
+                    builder.exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None);
+            }
+            "uniswap_v4" => {
+                builder = builder.exchange::<UniswapV3State>(
+                    "uniswap_v4",
+                    tvl_filter.clone(),
+                    Some(uniswap_v4_pool_with_hook_filter),
+                );
+            }
+            "curve" => {
+                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:curve",
+                    tvl_filter.clone(),
+                    Some(curve_pool_filter),
+                );
+            }
+            "balancer_v2" => {
+                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:balancer_v2",
+                    tvl_filter.clone(),
+                    Some(balancer_pool_filter),
+                );
+            }
+            "sushiswap_v2" => {
+                builder =
+                    builder.exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None);
+            }
+            "pancakeswap_v2" => {
+                builder =
+                    builder.exchange::<UniswapV2State>("pancakeswap_v2", tvl_filter.clone(), None);
+            }
+            "pancakeswap_v3" => {
+                builder =
+                    builder.exchange::<UniswapV2State>("pancakeswap_v3", tvl_filter.clone(), None);
+            }
+            _ => {
+                log(&format!("Unknown exchange: {}, ignoring", exchange));
+            }
+        }
+    }
+    builder
+}
+
 impl SimulationClient {
     async fn new(
         tycho_url: &str,
         api_key: Option<&str>,
         tvl_threshold: Option<f64>,
+        chain: Chain,
+        exchanges: Vec<String>,
     ) -> anyhow::Result<Self> {
         log("Initializing SimulationClient...");
 
-        // Use provided TVL threshold or default to 10,000
-        let tvl_threshold = tvl_threshold.unwrap_or(10_000.0);
+        // Use provided TVL threshold or default to 1000
+        let tvl_threshold = tvl_threshold.unwrap_or(1_000.0);
         log(&format!("Using TVL threshold: {}", tvl_threshold));
         let tvl_filter = ComponentFilter::with_tvl_range(tvl_threshold, tvl_threshold);
 
-        let all_tokens =
-            load_all_tokens(tycho_url, false, api_key, Chain::Ethereum, None, None).await;
+        let all_tokens = load_all_tokens(tycho_url, false, api_key, chain, None, None).await;
         log(&format!("Loaded {} tokens", all_tokens.len()));
 
-        // Match the protocol stream configuration from the example
-        let protocol_stream = ProtocolStreamBuilder::new(tycho_url, Chain::Ethereum)
-            .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
-            .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
-            .exchange::<EVMPoolState<PreCachedDB>>(
-                "vm:curve",
-                tvl_filter.clone(),
-                Some(curve_pool_filter),
-            )
-            .exchange::<EVMPoolState<PreCachedDB>>(
-                "vm:balancer_v2",
-                tvl_filter.clone(),
-                Some(balancer_pool_filter),
-            )
-            .auth_key(api_key.map(|s| s.to_string()))
-            .set_tokens(all_tokens.clone())
-            .await
-            .build()
-            .await?;
+        let protocol_stream = register_exchanges(
+            ProtocolStreamBuilder::new(tycho_url, chain),
+            exchanges,
+            tvl_filter,
+        )
+        .auth_key(api_key.map(|k| k.to_string()))
+        .skip_state_decode_failures(true)
+        .set_tokens(all_tokens.clone())
+        .await
+        .build()
+        .await
+        .expect("Failed building protocol stream");
 
         log("Protocol stream built successfully");
 
         let protocol_stream = Arc::new(TokioMutex::new(Box::new(protocol_stream) as StreamType));
 
-        // Store pairs like in the example
+        // Store simulation states and components
         let states = Arc::new(TokioMutex::new(HashMap::new()));
 
         // Get initial state
         {
-            // Add scope to limit the borrow
+            // Lock the stream to receive the first update
             let mut stream = protocol_stream.lock().await;
             if let Some(Ok(update)) = stream.next().await {
                 let mut states_map = states.lock().await;
@@ -95,7 +145,7 @@ impl SimulationClient {
                     update.new_pairs.len()
                 ));
 
-                // Store pairs and states
+                // Store states and components
                 for (id, comp) in update.new_pairs {
                     if let Some(state) = update.states.get(&id) {
                         states_map.insert(id.clone(), (state.clone(), comp.clone()));
@@ -104,7 +154,7 @@ impl SimulationClient {
 
                 log(&format!("Total pools now: {}", states_map.len()));
             }
-        } // stream is dropped here, releasing the lock
+        } // release the lock
 
         // Create a channel for stream updates
         let (tx, mut rx) = mpsc::channel(100);
@@ -164,7 +214,6 @@ impl SimulationClient {
             log("Update processor stopped");
         });
 
-        // Convert HashMap<Bytes, Token> to Vec<Token>
         let tokens = all_tokens.into_values().collect::<Vec<_>>();
         log(&format!("Converted {} tokens to vector", tokens.len()));
 
@@ -232,6 +281,44 @@ fn create_client(mut cx: FunctionContext) -> JsResult<JsPromise> {
             .unwrap()
             .value(&mut cx)
     });
+    let chain = match cx.argument_opt(3) {
+        Some(arg) => {
+            let chain_str = arg
+                .downcast::<JsString, FunctionContext>(&mut cx)
+                .unwrap()
+                .value(&mut cx);
+            match chain_str.to_lowercase().as_str() {
+                "ethereum" => Chain::Ethereum,
+                "base" => Chain::Base,
+                _ => {
+                    log(&format!(
+                        "Unknown chain: {}, defaulting to Ethereum",
+                        chain_str
+                    ));
+                    Chain::Ethereum
+                }
+            }
+        }
+        None => Chain::Ethereum,
+    };
+    let exchanges = match cx.argument_opt(4) {
+        Some(arg) => {
+            let exchanges_array = arg.downcast::<JsArray, FunctionContext>(&mut cx).unwrap();
+            let exchanges_len = exchanges_array.len(&mut cx);
+            let mut exchanges_vec = Vec::with_capacity(exchanges_len as usize);
+
+            for i in 0..exchanges_len {
+                let exchange = exchanges_array
+                    .get::<JsString, _, u32>(&mut cx, i)
+                    .unwrap()
+                    .value(&mut cx);
+                exchanges_vec.push(exchange);
+            }
+
+            exchanges_vec
+        }
+        None => Vec::new(),
+    };
 
     let channel = cx.channel();
     let (deferred, promise) = cx.promise();
@@ -239,7 +326,15 @@ fn create_client(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let rt = tokio::runtime::Runtime::new().unwrap();
     std::thread::spawn(move || {
         rt.block_on(async {
-            match SimulationClient::new(&tycho_url, api_key.as_deref(), tvl_threshold).await {
+            match SimulationClient::new(
+                &tycho_url,
+                api_key.as_deref(),
+                tvl_threshold,
+                chain,
+                exchanges,
+            )
+            .await
+            {
                 Ok(client) => {
                     deferred.settle_with(&channel, move |mut cx| {
                         Ok(cx.boxed(JsSimulationClient(Arc::new(client))))

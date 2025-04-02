@@ -2,7 +2,7 @@
   "name": "tycho-simulation-ts",
   "version": "0.1.0",
   "engines": {
-    "node": ">=16.0.0 <19.0.0"
+    "node": ">=16.0.0"
   },
   "description": "TypeScript bindings for Tycho simulation",
   "main": "dist/index.js",
@@ -16,7 +16,7 @@
   "scripts": {
     "build": "cargo build --release && npm run copy-lib && tsc",
     "copy-lib": "node scripts/copy-lib.js",
-    "build-all": "npm run clean && npm run build",
+    "build-all": "npm run build",
     "clean": "rm -rf target index.node dist 2>/dev/null || true",
     "prepare": "npm run build-all",
     "example": "ts-node examples/spot_price.ts"

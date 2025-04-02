@@ -67,7 +67,10 @@ async function main() {
     // Create client with your API key
     const client = await createClient(
       'https://api.tycho.xyz',
-      process.env.TYCHO_API_KEY
+      process.env.TYCHO_API_KEY,
+      100, // tvl threshold
+      "ethereum", // chain
+      ["uniswap_v2", "uniswap_v3"] // exchanges
     );
 
     // Get spot price

@@ -3,19 +3,21 @@ export interface SimulationClient {
 }
 
 export interface SwapResult {
-  poolAddress: string;
-  amountsOut: bigint[];
-  gasEstimates: bigint[];
-  protocol: string;
+    poolAddress: string;
+    amountsOut: bigint[];
+    gasEstimates: bigint[];
+    protocol: string;
 }
 
 export interface TychoSimulation {
     createClient: (
         url: string,
-        apiKey: string,
-        tvlThreshold: number
+        apiKey?: string,
+        tvlThreshold?: number,
+        chain?: string,
+        exchanges?: string[]
     ) => Promise<SimulationClient>;
-    
+
     getAmountOut: (
         client: SimulationClient,
         tokenIn: string,
@@ -23,5 +25,9 @@ export interface TychoSimulation {
         amountsIn: bigint[]
     ) => Promise<SwapResult[]>;
 
-  getSpotPrice(client: SimulationClient, token0: string, token1: string): Promise<bigint>;
+    getSpotPrice(
+        client: SimulationClient,
+        token0: string,
+        token1: string
+    ): Promise<bigint>;
 }
